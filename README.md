@@ -2,11 +2,13 @@
 Single file python DNS proxy that supports UDP, TCP and DOH
 
 This is a very simple python script that solves personal needs for better control over how to resolve your DNS.
-Through JSON config file, you can separate domains into three different categories, each of them has a group of DNS servers that you can specify.
-It also has simple private host resolve function and a redirect function, and if you want you can config to filter off some of the domains' IPV4 query result.
+Through JSON config file, you can separate domains into three different categories, each of them has a group of DNS servers which you can specify.
+It also has a simple private host resolve function and a redirect query function, and on special cases you can config to filter off some of the domains' IPV4 query result.
 
-It serves on UDP port, supports IPV6. The script itself can do UDP and TCP query on its own only with standard python lib.
-DOH requires HTTP/2, if you want to do DOH query, just install hyper module. Hyper is a HTTP/2 client lib for python.
+It serves on UDP port, it supports IPV6. The script itself can do UDP and TCP query on its own with just standard python libs.
+DOH requires HTTP/2, so if you want to do DOH query, you need to install hyper module.
+
+Hyper is a HTTP/2 client lib for python.
 By default hyper uses its built-in pure-Python HPACK encoder and decoder, which is not that efficient for DNS querie.
 So if you want to increase the performance, install nghttp2 library for the system and also install its python bindings (pynghttp2), hyper will transparently switch to using nghttp2‘s HPACK implementation instead of its own.
 
