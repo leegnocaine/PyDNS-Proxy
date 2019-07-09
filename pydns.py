@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 #
 # PyDNS Proxy
-# Single file python dns proxy that supports UDP, TCP and DOH
 # Author: leegnocaine
 # Thanks henices/Tcp-DNS-proxy for inspiration
 #
@@ -37,6 +36,7 @@ def hexdump(src, width=16):
     if not src:
         return ''
     FILTER = ''.join([(x < 0x7f and x > 0x1f) and chr(x) or '.' for x in range(256)])
+    FILTER = FILTER.encode('utf-8')
     result = []
     for i in range(0, len(src), width):
         s = src[i:i + width]
@@ -44,7 +44,7 @@ def hexdump(src, width=16):
             hexa = ' '.join(['%02X' % ord(x) for x in s])
         else:
             hexa = ' '.join(['%02X' % x for x in s])
-        printable = s.translate(FILTER.encode('utf-8'))
+        printable = s.translate(FILTER)
         result.append('%#06X   %s   %s\n' % (i, hexa, printable))
     return ''.join(result)
 
@@ -136,9 +136,9 @@ def bytetodomain(byte):
 
 def domaintobyte(domain):
     byte = b''
-    domain = domain.decode('utf-8').split('.')
+    domain = domain.split(b'.')
     for piece in domain:
-        piece = piece.encode('utf-8')
+        piece = piece
         i = 0
         length = len(piece)
         byte += struct.pack('!B', length)
@@ -286,13 +286,13 @@ def build_response(parse_data, an_count=0, resource=''):
     return response
 
 
-def private_host_query(parse_request):
+def private_host_query(parse_request, q_domain_str):
     data=None
     answer = b''
     counter = 0
 
     for domain, rets in CFG['private_host'].items():
-        if domain in parse_request.get('query').get(0).get('q_domain').decode('utf-8'):
+        if domain in q_domain_str:
             q_type = parse_request.get('query').get(0).get('q_type')
             a_class = parse_request.get('query').get(0).get('q_class')
             if q_type == 0x0001 or q_type == 0x001C:
@@ -408,6 +408,7 @@ def transfer(request, client, socket):
     pid = parse_request.get('PID')
     q_type = parse_request.get('query').get(0).get('q_type')
     q_domain = parse_request.get('query').get(0).get('q_domain')
+    q_domain_str = q_domain.decode('utf-8')
     cache_key = q_domain+struct.pack('!H', q_type)
 
     LOGGER.info('Receive: %s||%s %s' % (q_domain, RECORDTYPE.get(q_type, q_type), client))
@@ -415,7 +416,7 @@ def transfer(request, client, socket):
     if (q_type == 0x0001 or q_type == 0x001C or q_type == 0x0005 or q_type == 0x000C or q_type == 0x0002) and parse_request.get('qd_count') == 0x0001 and \
             parse_request.get('an_count') == 0x0000 and parse_request.get('ns_count') == 0x0000 and \
             parse_request.get('ar_count') == 0x0000:
-        response = private_host_query(parse_request)
+        response = private_host_query(parse_request, q_domain_str)
     if response:
         socket.sendto(response, client)
         LOGGER.info('%s||%s -> hit from private host' % (q_domain, RECORDTYPE.get(q_type, q_type)))
@@ -436,9 +437,10 @@ def transfer(request, client, socket):
     else:
         dns_server_list = CFG['primary_dns_server']
 
+    
     if CFG['redirect_domain']:
         for domain,redirect in CFG['redirect_domain'].items():
-            if domain == q_domain.decode('utf-8'):
+            if domain == q_domain_str:
                 LOGGER.info('%s||%s -> mark from redirect_domain' % (q_domain, RECORDTYPE.get(q_type, q_type)))
                 q_domain = redirect.encode('utf-8')
                 filter_redirect = True
@@ -446,7 +448,7 @@ def transfer(request, client, socket):
 
     if (q_type == 0x0001 or q_type == 0x001C or q_type == 0x0005) and CFG['ipv6_only_domain']:
         for ipv6_only_domain in CFG['ipv6_only_domain']:
-            if ipv6_only_domain == q_domain.decode('utf-8') or ('.'+ipv6_only_domain) in q_domain.decode('utf-8'):
+            if ipv6_only_domain == q_domain_str or ('.'+ipv6_only_domain) in q_domain_str:
                 LOGGER.info('%s||%s -> mark from ipv6_only_domain (%s)' % (q_domain, RECORDTYPE.get(q_type, q_type), ipv6_only_domain))
                 filter_ipv6 = True
                 bypass_internal = True
@@ -454,7 +456,7 @@ def transfer(request, client, socket):
 
     if CFG['private_dns_server'] and CFG['private_domain']:
         for private_domain in CFG['private_domain']:
-            if private_domain == q_domain.decode('utf-8') or ('.'+private_domain) in q_domain.decode('utf-8'):
+            if private_domain == q_domain_str or ('.'+private_domain) in q_domain_str:
                 LOGGER.info('%s||%s -> mark from private_domain (%s)' % (q_domain, RECORDTYPE.get(q_type, q_type), private_domain))
                 bypass_internal = True
                 dns_server_list = CFG['private_dns_server']
@@ -463,14 +465,14 @@ def transfer(request, client, socket):
 
     if CFG['internal_domain_exception']:
         for internal_domain_exception in CFG['internal_domain_exception']:
-            if internal_domain_exception == q_domain.decode('utf-8') or ('.'+internal_domain_exception) in q_domain.decode('utf-8'):
+            if internal_domain_exception == q_domain_str or ('.'+internal_domain_exception) in q_domain_str:
                 LOGGER.info('%s||%s -> mark from internal_domain_exception (%s)' % (q_domain, RECORDTYPE.get(q_type, q_type), internal_domain_exception))
                 bypass_internal = True
                 break
 
     if not bypass_internal and CFG['internal_dns_server'] and CFG['internal_domain']:
         for internal_domain in CFG['internal_domain']:
-            if internal_domain == q_domain.decode('utf-8') or ('.'+internal_domain) in q_domain.decode('utf-8'):
+            if internal_domain == q_domain_str or ('.'+internal_domain) in q_domain_str:
                 LOGGER.info('%s:%s mark from internal_domain (%s)' % (q_domain, RECORDTYPE.get(q_type, q_type), internal_domain))
                 dns_server_list = CFG['internal_dns_server']
                 querymode = CFG['internal_dns_querymode']
