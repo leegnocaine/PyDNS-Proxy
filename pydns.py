@@ -2,13 +2,14 @@
 # -*- coding: utf-8 -*-
 #
 # PyDNS Proxy
+# Single file python dns proxy that supports UDP, TCP and DOH
 # Author: leegnocaine
 # Thanks henices/Tcp-DNS-proxy for inspiration
 #
 #
 
 
-import os, argparse, json, logging, struct, time, socket, traceback
+import os, argparse, json, logging, logging.handlers, struct, time, socket, traceback
 from threading import Thread, Lock
 from multiprocessing.dummy import Pool
 try:
@@ -52,7 +53,7 @@ def hexdump(src, width=16):
 def set_logger(log_file, set_level):
     logging.addLevelName(5, 'RAW')
     if log_file:
-        handler = logging.FileHandler(filename=log_file)
+        handler = logging.handlers.RotatingFileHandler(filename=log_file, maxBytes=204800, backupCount=2)
     else:
         handler = logging.StreamHandler()
     handler.setFormatter(logging.Formatter('[%(asctime)s][%(levelname)s] %(message)s'))
@@ -114,8 +115,8 @@ def load_cfg():
 
 def schedule_reload_cfg(interval):
     while True:
-        load_cfg()
         time.sleep(interval)
+        load_cfg()
 
 
 def bytetodomain(byte):
@@ -399,7 +400,7 @@ def transfer(request, client, socket):
     global CACHE
 
     if len(request) < 12:
-        LOGGER.error('check request length failed!')
+        LOGGER.error('check request length failed! %s'  % (client))
         return
     LOGGER.log(5, '-> RAW Request: \n%s' % hexdump(request))
     response = None
@@ -494,7 +495,7 @@ def transfer(request, client, socket):
         response = QueryDNS(server, request, querymode, CFG['socket_timeout'], q_domain, q_type)
 
         if response is None or len(response) < 12:
-            LOGGER.error('%s||%s -> check response length failed!' % (q_domain, RECORDTYPE.get(q_type, q_type)))
+            LOGGER.error('%s||%s -> check response length failed! %s' % (q_domain, RECORDTYPE.get(q_type, q_type), server))
             continue
 
         response = response
@@ -564,14 +565,16 @@ def transfer(request, client, socket):
         break
 
     if response is None:
-        LOGGER.error('Tried many times and failed to resolve %s' % q_domain)
+        LOGGER.error('Tried many times and failed to resolve %s||%s' % (q_domain, RECORDTYPE.get(q_type, q_type)))
 
 
 def run_server(cmdargs):
     LOGGER.warning('Serving PyDNS Proxy on %s port %s ...' % (args.ip, args.port))
-    reload_cfg = Thread(target=schedule_reload_cfg, args=[cmdargs.reload_interval])
-    reload_cfg.setDaemon(True)
-    reload_cfg.start()
+    load_cfg()
+    if cmdargs.reload_interval > 0:
+        reload_cfg = Thread(target=schedule_reload_cfg, args=[cmdargs.reload_interval])
+        reload_cfg.setDaemon(True)
+        reload_cfg.start()
     if cmdargs.port < 0 or cmdargs.port > 65535:
         LOGGER.critical('Wrong port to listen.')
         os._exit(1)
@@ -723,8 +726,8 @@ if __name__ == '__main__':
                         dest='reload_interval',
                         type=int,
                         required=False,
-                        default=43200,
-                        help='Interval (seconds) to auto-reload config file')
+                        default=0,
+                        help='Interval (seconds) to auto-reload config file (0 is disabled)')
     parser.add_argument('-port',
                         type=int,
                         default=53,
