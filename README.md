@@ -10,7 +10,7 @@ DOH requires HTTP/2, so if you want to do DOH query, you need to install hyper m
 
 Hyper is a HTTP/2 client lib for python.
 By default hyper uses its built-in pure-Python HPACK encoder and decoder, which is not that efficient for DNS querie.
-So if you want to increase the performance, install nghttp2 library for the system and also install its python bindings (pynghttp2), hyper will transparently switch to using nghttp2‘s HPACK implementation instead of its own.
+So if you want to increase the performance, install nghttp2 library for the system and also install its python bindings, hyper will transparently switch to using nghttp2‘s HPACK implementation instead of its own.
 
 For Hyper, read more on https://hyper.readthedocs.io/
 For nghttp2, read more on https://nghttp2.org
