@@ -267,7 +267,7 @@ def build_resource(a_type, a_class, a_rdata):
     return resource
 
 
-def build_response(parse_data, an_count=0, resource=''):
+def build_response(parse_data, an_count=0, ns_count=0, ar_count=0, resource=''):
     #query id
     response = parse_data.get('PID')
     #flag normally is 0x8180
@@ -276,8 +276,8 @@ def build_response(parse_data, an_count=0, resource=''):
     response += struct.pack('!H', parse_data.get('qd_count'))
     #answer number
     response += struct.pack('!H', an_count)
-    response += struct.pack('!H', parse_data.get('ns_count'))
-    response += struct.pack('!H', parse_data.get('ar_count'))
+    response += struct.pack('!H', ns_count)
+    response += struct.pack('!H', ar_count)
     #header finished, start query
     response += domaintobyte(parse_data.get('query').get(0).get('q_domain'))
     response += struct.pack('!H', parse_data.get('query').get(0).get('q_type'))
@@ -287,14 +287,13 @@ def build_response(parse_data, an_count=0, resource=''):
     return response
 
 
-def private_host_query(parse_request, q_domain_str):
+def private_host_query(parse_request, q_domain_str, q_type):
     data=None
     answer = b''
     counter = 0
 
     for domain, rets in CFG['private_host'].items():
-        if domain in q_domain_str:
-            q_type = parse_request.get('query').get(0).get('q_type')
+        if domain == q_domain_str:
             a_class = parse_request.get('query').get(0).get('q_class')
             if q_type == 0x0001 or q_type == 0x001C:
                 for ret in rets:
@@ -318,7 +317,7 @@ def private_host_query(parse_request, q_domain_str):
                         ret = ret[1:].encode('utf-8')
                         counter += 1
                         answer += build_resource(q_type, a_class, ret)
-            data=build_response(parse_request, counter, answer)
+            data=build_response(parse_request, counter, resource=answer)
             LOGGER.debug('-> an_count: %s' % (counter))
             for i in range(counter):
                 a_type = resolve_data(data).get('answer').get(i).get('a_type')
@@ -408,10 +407,18 @@ def transfer(raw_request, client, socket):
 
     pid = parse_request.get('PID')
     q_type = parse_request.get('query').get(0).get('q_type')
+    q_type_org = q_type
     q_domain = parse_request.get('query').get(0).get('q_domain')
+    q_domain_org = q_domain
     q_domain_str = q_domain.decode('utf-8')
     LOGGER.info('Receive: %s||%s %s' % (q_domain, RECORDTYPE.get(q_type, q_type), client))
     
+    cache_key = q_domain+struct.pack('!H', q_type)
+    if cache_key in CACHE:
+        response = CACHE[cache_key].get('response')
+        socket.sendto(pid + response, client)
+        LOGGER.info('%s||%s -> hit from cache' % (q_domain, RECORDTYPE.get(q_type, q_type)))
+        return
 
     filter_redirect = False
     filter_ipv6 = False
@@ -422,7 +429,7 @@ def transfer(raw_request, client, socket):
     else:
         dns_server_list = CFG['primary_dns_server']
     
-    if CFG['redirect_domain']:
+    if (q_type == 0x0001 or q_type == 0x001C or q_type == 0x0005) and CFG['redirect_domain']:
         for domain,redirect in CFG['redirect_domain'].items():
             if domain == q_domain_str:
                 LOGGER.info('%s||%s -> mark from redirect_domain' % (q_domain, RECORDTYPE.get(q_type, q_type)))
@@ -443,27 +450,22 @@ def transfer(raw_request, client, socket):
                     q_type = 0x001C
                 break
     
-    if filter_redirect or filter_ipv6:
-        raw_request = build_request(parse_request, q_domain, q_type)
-        parse_request = resolve_data(raw_request)
     
     if (q_type == 0x0001 or q_type == 0x001C or q_type == 0x0005 or q_type == 0x000C or q_type == 0x0002) and \
             parse_request.get('qd_count') == 0x0001 and \
             parse_request.get('an_count') == 0x0000 and \
             parse_request.get('ns_count') == 0x0000 and \
             parse_request.get('ar_count') == 0x0000:
-        response = private_host_query(parse_request, q_domain_str)
+        response = private_host_query(parse_request, q_domain_str, q_type)
     if response:
         socket.sendto(response, client)
         LOGGER.info('%s||%s -> hit from private host' % (q_domain, RECORDTYPE.get(q_type, q_type)))
         return
 
-    cache_key = q_domain+struct.pack('!H', q_type)
-    if cache_key in CACHE:
-        response = CACHE[cache_key].get('response')
-        socket.sendto(pid + response, client)
-        LOGGER.info('%s||%s -> hit from cache' % (q_domain, RECORDTYPE.get(q_type, q_type)))
-        return
+
+    if filter_redirect or filter_ipv6:
+        raw_request = build_request(parse_request, q_domain, q_type)
+        parse_request = resolve_data(raw_request)
 
 
     if CFG['private_dns_server'] and CFG['private_domain']:
@@ -509,40 +511,29 @@ def transfer(raw_request, client, socket):
         if not legit_response_packet(parse_response, parse_request):
             continue
 
+        if filter_redirect:
+            parse_response['query'][0]['q_domain'] = q_domain_org
+            answers = b''
+            for answer in parse_response['answer'].items():
+                answers += build_resource(answer[1]['a_type'],answer[1]['a_class'],answer[1]['a_rdata'])
+            response = build_response(parse_response, parse_response['an_count'], resource=answers)
+
         if filter_ipv6:
-            if q_type == 0x0001:
+            if q_type_org == 0x0001:
                 parse_response['query'][0]['q_type'] = 0x0001
-            count_cname = 0
-            count_ipv4 = 0
-            count_ipv6 = 0
-            for i in range(parse_response.get('an_count')):
-                if parse_response.get('answer').get(i).get('a_type') == 0x0005:
-                    count_cname += 1
-                if parse_response.get('answer').get(i).get('a_type') == 0x0001:
-                    count_ipv4 += 1
-                if parse_response.get('answer').get(i).get('a_type') == 0x001C:
-                    count_ipv6 += 1
-            if count_ipv6 == 0 and count_cname == 0:
-                LOGGER.debug('%s||%s -> ipv6 only filter, detect no ipv6 no cname in response' % (q_domain, RECORDTYPE.get(q_type, q_type)))
-                continue
-            elif count_ipv4 > 0:
-                LOGGER.debug('%s||%s -> ipv6 only filter, detect ipv4 and ipv6 in response' % (q_domain, RECORDTYPE.get(q_type, q_type)))
-                for i in range(parse_response.get('an_count')):
-                    if parse_response.get('answer').get(i).get('a_type') == 0x0001:
-                        del parse_response['answer'][i]
-                        parse_response['an_count'] -= 1
-            answers = ''
-            for answer in parse_response.get('answer').items():
-                answers += answer[1].get('RAW')
-            response = build_response(parse_response, parse_response.get('an_count'), answers+parse_response.get('OTHER'))
+            answers = b''
+            for i in range(parse_response['an_count']):
+                if parse_response['answer'][i]['a_type'] == 0x0001:
+                    del parse_response['answer'][i]
+                    parse_response['an_count'] -= 1
+                else:
+                    answers += parse_response['answer'][i]['RAW']
+            response = build_response(parse_response, parse_response['an_count'], parse_response['ns_count'], parse_response['ar_count'], answers+parse_response['OTHER'])
 
         socket.sendto(response, client)
         LOGGER.info('Finish: %s||%s %s %s' % (q_domain, RECORDTYPE.get(q_type, q_type), server, client))
 
         if parse_response.get('an_count') > 0:
-            if filter_ipv6 and count_ipv6 == 0:
-                LOGGER.debug('%s||%s -> ipv6 only filter, no ip in response, skip cache' % (q_domain, RECORDTYPE.get(q_type, q_type)))
-                break
             #running in thread, lock to prevent unexpected error
             LOCK.acquire()
             CACHE[cache_key] = {}
