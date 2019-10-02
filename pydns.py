@@ -298,11 +298,11 @@ def private_host_query(parse_request, q_domain_str):
             a_class = parse_request.get('query').get(0).get('q_class')
             if q_type == 0x0001 or q_type == 0x001C:
                 for ret in rets:
-                    if '.' in ret and ret[0:1] != '!':
+                    if q_type == 0x0001 and '.' in ret and ret[0:1] != '!':
                         # A record
                         counter += 1
                         answer += build_resource(0x0001, a_class, ret)
-                    elif ':' in ret and ret[0:1] != '!':
+                    elif q_type == 0x001C and ':' in ret and ret[0:1] != '!':
                         # AAAA record
                         counter += 1
                         answer += build_resource(0x001C, a_class, ret)
@@ -385,11 +385,11 @@ def legit_response_packet(parse_response, parse_request):
     return True
 
 
-def transfer(request, client, socket):
+def transfer(raw_request, client, socket):
     '''send udp dns response back to client program
 
     Args:
-        request: udp dns request
+        raw_request: udp dns raw request
         client: udp dns client address
         socket: udp dns socket
 
@@ -399,35 +399,19 @@ def transfer(request, client, socket):
 
     global CACHE
 
-    if len(request) < 12:
+    if len(raw_request) < 12:
         LOGGER.error('check request length failed! %s'  % (client))
         return
-    LOGGER.log(5, '-> RAW Request: \n%s' % hexdump(request))
+    LOGGER.log(5, '-> RAW Request: \n%s' % hexdump(raw_request))
     response = None
-    parse_request = resolve_data(request)
+    parse_request = resolve_data(raw_request)
 
     pid = parse_request.get('PID')
     q_type = parse_request.get('query').get(0).get('q_type')
     q_domain = parse_request.get('query').get(0).get('q_domain')
     q_domain_str = q_domain.decode('utf-8')
-    cache_key = q_domain+struct.pack('!H', q_type)
-
     LOGGER.info('Receive: %s||%s %s' % (q_domain, RECORDTYPE.get(q_type, q_type), client))
-
-    if (q_type == 0x0001 or q_type == 0x001C or q_type == 0x0005 or q_type == 0x000C or q_type == 0x0002) and parse_request.get('qd_count') == 0x0001 and \
-            parse_request.get('an_count') == 0x0000 and parse_request.get('ns_count') == 0x0000 and \
-            parse_request.get('ar_count') == 0x0000:
-        response = private_host_query(parse_request, q_domain_str)
-    if response:
-        socket.sendto(response, client)
-        LOGGER.info('%s||%s -> hit from private host' % (q_domain, RECORDTYPE.get(q_type, q_type)))
-        return
-
-    if cache_key in CACHE:
-        response = CACHE[cache_key].get('response')
-        socket.sendto(pid + response, client)
-        LOGGER.info('%s||%s -> hit from cache' % (q_domain, RECORDTYPE.get(q_type, q_type)))
-        return
+    
 
     filter_redirect = False
     filter_ipv6 = False
@@ -437,23 +421,50 @@ def transfer(request, client, socket):
         dns_server_list = SPEEDTEST.fast_servers
     else:
         dns_server_list = CFG['primary_dns_server']
-
     
     if CFG['redirect_domain']:
         for domain,redirect in CFG['redirect_domain'].items():
             if domain == q_domain_str:
                 LOGGER.info('%s||%s -> mark from redirect_domain' % (q_domain, RECORDTYPE.get(q_type, q_type)))
-                q_domain = redirect.encode('utf-8')
                 filter_redirect = True
+                q_domain = redirect.encode('utf-8')
+                q_domain_str = q_domain.decode('utf-8')
+                LOGGER.debug('%s -> redirect request filter, change request domain' % (q_domain))
                 break
-
+    
     if (q_type == 0x0001 or q_type == 0x001C or q_type == 0x0005) and CFG['ipv6_only_domain']:
         for ipv6_only_domain in CFG['ipv6_only_domain']:
             if ipv6_only_domain == q_domain_str or ('.'+ipv6_only_domain) in q_domain_str:
                 LOGGER.info('%s||%s -> mark from ipv6_only_domain (%s)' % (q_domain, RECORDTYPE.get(q_type, q_type), ipv6_only_domain))
                 filter_ipv6 = True
                 bypass_internal = True
+                if q_type == 0x0001:
+                    LOGGER.debug('%s||%s -> ipv6 only filter, change request type' % (q_domain, RECORDTYPE.get(q_type, q_type)))
+                    q_type = 0x001C
                 break
+    
+    if filter_redirect or filter_ipv6:
+        raw_request = build_request(parse_request, q_domain, q_type)
+        parse_request = resolve_data(raw_request)
+    
+    if (q_type == 0x0001 or q_type == 0x001C or q_type == 0x0005 or q_type == 0x000C or q_type == 0x0002) and \
+            parse_request.get('qd_count') == 0x0001 and \
+            parse_request.get('an_count') == 0x0000 and \
+            parse_request.get('ns_count') == 0x0000 and \
+            parse_request.get('ar_count') == 0x0000:
+        response = private_host_query(parse_request, q_domain_str)
+    if response:
+        socket.sendto(response, client)
+        LOGGER.info('%s||%s -> hit from private host' % (q_domain, RECORDTYPE.get(q_type, q_type)))
+        return
+
+    cache_key = q_domain+struct.pack('!H', q_type)
+    if cache_key in CACHE:
+        response = CACHE[cache_key].get('response')
+        socket.sendto(pid + response, client)
+        LOGGER.info('%s||%s -> hit from cache' % (q_domain, RECORDTYPE.get(q_type, q_type)))
+        return
+
 
     if CFG['private_dns_server'] and CFG['private_domain']:
         for private_domain in CFG['private_domain']:
@@ -482,17 +493,8 @@ def transfer(request, client, socket):
     LOGGER.debug('%s||%s -> dns list: %s' % (q_domain, RECORDTYPE.get(q_type, q_type), dns_server_list))
     for server in dns_server_list:
 
-        if filter_redirect:
-            LOGGER.debug('%s -> redirect request filter, change request domain' % (q_domain))
-            request = build_request(parse_request, q_domain, False)
-
-        if filter_ipv6 and q_type == 0x0001:
-            LOGGER.debug('%s||%s -> ipv4 request filter, change request type' % (q_domain, RECORDTYPE.get(q_type, q_type)))
-            request = build_request(parse_request, False, 0x001C)
-            parse_request = resolve_data(request)
-
         LOGGER.debug('Querying: %s||%s -> server: %s mode: %s' % (q_domain, RECORDTYPE.get(q_type, q_type), server, querymode))
-        response = QueryDNS(server, request, querymode, CFG['socket_timeout'], q_domain, q_type)
+        response = QueryDNS(server, raw_request, querymode, CFG['socket_timeout'], q_domain, q_type)
 
         if response is None or len(response) < 12:
             LOGGER.error('%s||%s -> check response length failed! %s' % (q_domain, RECORDTYPE.get(q_type, q_type), server))
